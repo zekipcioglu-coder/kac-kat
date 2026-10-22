@@ -1,0 +1,9 @@
+{
+  "name": "kac-kat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes serve@14.2.4 -l 5173 .",
+    "test": "node --test"
+  }
+}
