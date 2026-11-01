@@ -191,6 +191,7 @@ const analytics = (() => {
   const local = store.get('localStats', { runs: 0, saved: 0, fell: 0, totalSec: 0, floors: [], decisions: { save: 0, continue: 0, timeout: 0 }, quickReplays: 0 });
 
   function track(event, props = {}) {
+    if (new URLSearchParams(location.search).has('onizleme')) return;
     queue.push({
       event,
       properties: { distinct_id: id, $session_id: sessionId, $process_person_profile: false, build: ANALYTICS.build, ...props },
@@ -586,6 +587,45 @@ function palette(f) {
 
 function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
 
+// ------------------------------------------------------------------
+// Arka plan görselleri (tasarımcı dosyaları) — kurallar: TASARIM_ARKAPLAN.md
+// assets/bg/<tema>/<katman>.webp (yoksa .png) aranır. Dosya yoksa o katman
+// için yukarıdaki çizgi çizim kullanılır; yani görseller tek tek eklenebilir.
+// Görseller @3x çizilir: 1 oyun birimi = 3 piksel.
+// ------------------------------------------------------------------
+const BG_THEMES = [
+  { id: 'lefkosa', from: 0 },   // eski şehir sokağı, öğle
+  { id: 'girne',   from: 15 },  // liman ve Beşparmaklar, açık gök
+  { id: 'magusa',  from: 30 },  // surlar, gün batımı
+  { id: 'karpaz',  from: 41 },  // yaz gecesi (41. katta çizgiler açık renge döner)
+  { id: 'uzay',    from: 75 },  // yörünge, adanın üstü
+];
+const BG_PX = 3;       // görsel pikseli / oyun birimi
+const BG_FADE = 3;     // temalar arası geçiş süresi (kat)
+const bgCache = {};
+function bgImg(theme, name) {
+  const key = theme + '/' + name;
+  let e = bgCache[key];
+  if (!e) {
+    e = bgCache[key] = { im: null };
+    const im = new Image();
+    im.onload = () => { e.im = im; };
+    im.onerror = () => { if (!im.src.endsWith('.png')) im.src = `assets/bg/${key}.png`; };
+    im.src = `assets/bg/${key}.webp`;
+  }
+  return e.im;
+}
+function themeIndexAt(f) {
+  let t = 0;
+  for (let k = 0; k < BG_THEMES.length; k++) if (f >= BG_THEMES[k].from) t = k;
+  return t;
+}
+// Bir sonraki temanın dosyalarını önceden iste
+function bgPreload(f) {
+  const t = themeIndexAt(f + BG_FADE + 4);
+  for (const n of ['ufuk', 'suslem', 'cephe_sol', 'cephe_sag', 'sokak']) bgImg(BG_THEMES[t].id, n);
+}
+
 let ink = INK_DARK;
 function render() {
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
@@ -605,12 +645,16 @@ function render() {
 
   ctx.save();
   ctx.translate(jx, 0);
+  bgPreload(camFloor);
   drawBackdrop(camFloor, anchor);
   drawBuildings(sy);
 
   // sokak
   const gy = sy(0);
-  if (gy < H + 10) {
+  const street = bgImg(BG_THEMES[0].id, 'sokak');
+  if (street && gy < H + 10) {
+    ctx.drawImage(street, 0, gy, W, street.height / BG_PX);
+  } else if (gy < H + 10) {
     ctx.strokeStyle = ink; ctx.lineWidth = 2;
     line(0, gy, W, gy);
     ctx.lineWidth = 1.5; ctx.globalAlpha = 0.5;
@@ -647,12 +691,40 @@ function render() {
   if (state !== 'ANA_MENU') drawHUD();
 }
 
-// Uzaktaki şehir silüeti, bulutlar ve yıldızlar — hepsi ince çizgi
+// Uzak katmanlar: tema görselleri varsa onlar, yoksa ince çizgi silüet/bulut/yıldız
+function drawThemeFar(t, alpha, anchor) {
+  const th = BG_THEMES[t];
+  const far = bgImg(th.id, 'ufuk');
+  ctx.globalAlpha = alpha;
+  if (far) {
+    // alt kenarı: ilk temada sokak hizası, diğerlerinde ekranın altı; 0.3 hızla aşağı kayar
+    const bottom = (t === 0 ? anchor : H) + (camY - th.from * CFG.gap) * 0.3;
+    const h = far.height / BG_PX;
+    if (bottom - h < H && bottom > 0) ctx.drawImage(far, 0, bottom - h, W, h);
+  }
+  const dec = bgImg(th.id, 'suslem');
+  if (dec) {
+    // dikeyde kesintisiz tekrar eden süsleme (bulut, kuş, uçurtma…), 0.5 hızla kayar
+    const h = dec.height / BG_PX;
+    const off = (camY * 0.5) % h;
+    for (let y = off - h; y < H; y += h) ctx.drawImage(dec, 0, y, W, h);
+  }
+  ctx.globalAlpha = 1;
+  return !!dec;
+}
+
 function drawBackdrop(camFloor, anchor) {
+  const t = themeIndexAt(camFloor);
+  const fade = t > 0 ? clamp((camFloor - BG_THEMES[t].from) / BG_FADE, 0, 1) : 1;
+  let decOk = false;
+  if (fade < 1) decOk = drawThemeFar(t - 1, 1, anchor);
+  decOk = drawThemeFar(t, fade, anchor) || decOk;
+  const farOk = !!bgImg(BG_THEMES[0].id, 'ufuk');
+
   ctx.strokeStyle = ink; ctx.lineWidth = 1.2;
   // silüet: yavaş kayan (parallax) arka plan
   const base = anchor + camY * 0.3;
-  if (base - 260 < H) {
+  if (!farOk && base - 260 < H) {
     ctx.globalAlpha = 0.18;
     const hs = [120, 190, 90, 240, 150, 200, 110];
     for (let k = 0; k < hs.length; k++) {
@@ -662,6 +734,7 @@ function drawBackdrop(camFloor, anchor) {
     }
     ctx.globalAlpha = 1;
   }
+  if (decOk) return;
   // bulutlar
   if (camFloor > 8 && camFloor < 55) {
     ctx.globalAlpha = 0.22 * Math.min(1, (camFloor - 8) / 6) * Math.min(1, (55 - camFloor) / 6);
@@ -704,19 +777,33 @@ function drawBuildings(sy) {
   for (let i = Math.max(0, anchorFloorLo); i <= anchorFloorHi; i++) {
     const y = sy(i * CFG.gap);
     if (y < -CFG.gap || y > bottom + CFG.gap) continue;
+    const th = BG_THEMES[themeIndexAt(i)];
+    const imL = bgImg(th.id, 'cephe_sol'), imR = bgImg(th.id, 'cephe_sag');
+    if (imL) drawFacade(imL, i - th.from, 0, y);
+    if (imR) drawFacade(imR, i - th.from, WR, y);
     ctx.globalAlpha = 0.35;
-    line(0, y + 0.5, WL, y + 0.5);
-    line(WR, y + 0.5, W, y + 0.5);
+    if (!imL) line(0, y + 0.5, WL, y + 0.5);
+    if (!imR) line(WR, y + 0.5, W, y + 0.5);
     // pencereler (kat arasında)
     const wy = y - CFG.gap + 38, wh = 52;
     if (wy + wh < bottom) {
-      ctx.strokeRect(8, wy, 22, wh);
-      line(19, wy, 19, wy + wh);
-      ctx.strokeRect(W - 30, wy, 22, wh);
-      line(W - 19, wy, W - 19, wy + wh);
+      if (!imL) { ctx.strokeRect(8, wy, 22, wh); line(19, wy, 19, wy + wh); }
+      if (!imR) { ctx.strokeRect(W - 30, wy, 22, wh); line(W - 19, wy, W - 19, wy + wh); }
     }
     ctx.globalAlpha = 1;
   }
+  // oyun sınırı olan cephe çizgileri her zaman görselin üstünde
+  ctx.lineWidth = 2;
+  line(WL, top, WL, bottom);
+  line(WR, top, WR, bottom);
+}
+
+// Cephe karosu: yüksekliği 1 veya daha fazla kat olabilir (390 px'in katı).
+// k: temanın başından itibaren kaçıncı kat; karonun alt kenarı = kat çizgisi
+function drawFacade(im, k, x, y) {
+  const fp = CFG.gap * BG_PX, n = Math.max(1, Math.round(im.height / fp));
+  const row = ((k % n) + n) % n;
+  ctx.drawImage(im, 0, im.height - (row + 1) * fp, im.width, fp, x, y - CFG.gap, WL, CFG.gap);
 }
 
 function drawPlatform(p, y) {
@@ -940,13 +1027,32 @@ analytics.track('session_start', {
   standalone: window.matchMedia('(display-mode: standalone)').matches,
   returning: highestFloor > 0,
 });
+// Tasarım önizlemesi: index.html?onizleme (otomatik tırmanır, dokununca durur)
+// ya da index.html?onizleme=30 (30. katta sabit). Veri gönderilmez.
+const PREVIEW = new URLSearchParams(location.search).get('onizleme');
+let previewPaused = false;
+if (PREVIEW != null) {
+  show(null);
+  state = 'ONIZLEME';
+  if (PREVIEW !== '') { camY = (+PREVIEW || 0) * CFG.gap; previewPaused = true; }
+  stage.addEventListener('pointerdown', () => { previewPaused = !previewPaused; });
+}
+function updatePreview(dt) {
+  if (!previewPaused) camY += dt * 3 * CFG.gap;
+  if (camY > 90 * CFG.gap) { camY = 0; resetRun(); }
+  cur = Math.max(0, Math.round(camY / CFG.gap));
+  while (plats[plats.length - 1].i < cur + 12) plats.push(makePlatform(plats[plats.length - 1].i + 1));
+  const p = platById(cur);
+  if (p) { ch.Y = p.Y; ch.x = p.x; }
+}
+
 let last = performance.now();
 function frame(now) {
   requestAnimationFrame(frame);
   if (!stage.style.width) resize();
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  update(dt);
+  if (state === 'ONIZLEME') updatePreview(dt); else update(dt);
   render();
 }
 requestAnimationFrame(frame);
